@@ -31,7 +31,7 @@ import { cn } from '@/lib/utils';
 type GameKey = 'numbers' | 'counting' | 'math';
 type LevelKey = 'level1' | 'level2';
 type ObjectKey = 'fruit' | 'animal' | 'toy' | 'food';
-type AudioVoiceKey = 'hoai-my' | 'google-north';
+type AudioVoiceKey = 'natural-female' | 'hoai-my' | 'google-north';
 
 type Challenge = {
   answer: number;
@@ -223,11 +223,73 @@ function makeChallenge(game: GameKey, level: LevelKey): Challenge {
 }
 
 const audioVoices: Record<AudioVoiceKey, { label: string; path: string }> = {
-  'google-north': { label: 'Mai Bắc · Nhẹ nhàng', path: '/audio/google-north' },
+  'natural-female': { label: 'Nữ tự nhiên · Diễn cảm', path: '/audio/natural-female' },
   'hoai-my': { label: 'Hoài My · Tự nhiên', path: '/audio/hoai-my' },
+  'google-north': { label: 'Mai Bắc · Nhẹ nhàng', path: '/audio/google-north' },
 };
+
 let activeAudio: HTMLAudioElement | null = null;
 let audioPlaybackId = 0;
+const audioBlobUrls = new Map<string, string>();
+const audioPreloadPromises = new Map<string, Promise<void>>();
+const defaultAudioRate = 1.1;
+const correctAudioRate = 1.2;
+
+function audioUrl(file: string, voice: AudioVoiceKey) {
+  return `${audioVoices[voice].path}/${file}.mp3`;
+}
+
+function preloadAudioFile(file: string, voice: AudioVoiceKey) {
+  if (typeof window === 'undefined') return;
+
+  const url = audioUrl(file, voice);
+  if (audioBlobUrls.has(url) || audioPreloadPromises.has(url)) return;
+
+  const promise = fetch(url)
+    .then((response) => {
+      if (!response.ok) throw new Error(`Audio preload failed: ${url}`);
+      return response.blob();
+    })
+    .then((blob) => {
+      audioBlobUrls.set(url, URL.createObjectURL(blob));
+    })
+    .catch(() => {
+      audioPreloadPromises.delete(url);
+    });
+
+  audioPreloadPromises.set(url, promise);
+}
+
+function preloadAudioFiles(files: string[], voice: AudioVoiceKey) {
+  for (const file of files) preloadAudioFile(file, voice);
+}
+
+function voiceWarmupFiles(voice: AudioVoiceKey) {
+  const shared = [
+    'celebrate',
+    'correct',
+    'count-animal',
+    'count-food',
+    'count-fruit',
+    'count-toy',
+    'equals',
+    'minus',
+    'plus',
+    'try-again',
+  ];
+
+  if (voice !== 'natural-female') {
+    return ['ask-number', ...shared, ...Array.from({ length: 101 }, (_, number) => `number-${number}`)];
+  }
+
+  return [
+    'math-start',
+    ...shared,
+    ...Array.from({ length: 101 }, (_, number) => `number-${number}`),
+    ...Array.from({ length: 101 }, (_, number) => `ask-number-${number}`),
+    ...Array.from({ length: 101 }, (_, number) => `correct-number-${number}`),
+  ];
+}
 
 function stopVoiceAudio() {
   audioPlaybackId += 1;
@@ -238,7 +300,11 @@ function stopVoiceAudio() {
   activeAudio = null;
 }
 
-async function playAudioFiles(files: string[], voice: AudioVoiceKey) {
+async function playAudioFiles(
+  files: string[],
+  voice: AudioVoiceKey,
+  playbackRate = defaultAudioRate,
+) {
   if (typeof window === 'undefined') return false;
 
   stopVoiceAudio();
@@ -247,8 +313,10 @@ async function playAudioFiles(files: string[], voice: AudioVoiceKey) {
   for (const file of files) {
     if (playbackId !== audioPlaybackId) return false;
 
-    const audio = new Audio(`${audioVoices[voice].path}/${file}.mp3`);
-    audio.playbackRate = 1.1;
+    const url = audioUrl(file, voice);
+    const audio = new Audio(audioBlobUrls.get(url) ?? url);
+    audio.preload = 'auto';
+    audio.playbackRate = playbackRate;
     activeAudio = audio;
     try {
       await audio.play();
@@ -267,16 +335,26 @@ async function playAudioFiles(files: string[], voice: AudioVoiceKey) {
   return playbackId === audioPlaybackId;
 }
 
-function challengeAudioFiles(challenge: Challenge, game: GameKey) {
+function challengeAudioFiles(challenge: Challenge, game: GameKey, voice: AudioVoiceKey) {
+  if (voice === 'natural-female' && game === 'numbers') {
+    return [`ask-number-${challenge.answer}`];
+  }
+
   if (game === 'numbers') return ['ask-number', `number-${challenge.answer}`];
   if (game === 'counting') return [`count-${challenge.objectKey ?? 'fruit'}`];
 
   return [
+    ...(voice === 'natural-female' ? ['math-start'] : []),
     `number-${challenge.left ?? 0}`,
     challenge.operation === '-' ? 'minus' : 'plus',
     `number-${challenge.right ?? 0}`,
     'equals',
   ];
+}
+
+function correctAudioFiles(answer: number, voice: AudioVoiceKey) {
+  if (voice === 'natural-female') return [`correct-number-${answer}`];
+  return ['correct', `number-${answer}`];
 }
 
 function playApplause() {
@@ -534,12 +612,18 @@ export default function Home() {
   useEffect(() => {
     if (isCelebrating) return;
 
+    preloadAudioFiles(challengeAudioFiles(challenge, activeGame, audioVoice), audioVoice);
+
     const timer = window.setTimeout(() => {
-      void playAudioFiles(challengeAudioFiles(challenge, activeGame), audioVoice);
-    }, 1500);
+      void playAudioFiles(challengeAudioFiles(challenge, activeGame, audioVoice), audioVoice);
+    }, 900);
 
     return () => window.clearTimeout(timer);
   }, [activeGame, audioVoice, challenge, isCelebrating]);
+
+  useEffect(() => {
+    preloadAudioFiles(voiceWarmupFiles(audioVoice), audioVoice);
+  }, [audioVoice]);
 
   function clearTimers() {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
@@ -595,11 +679,13 @@ export default function Home() {
       }
 
       setCorrectInSet(nextCorrect);
-      void playAudioFiles(['correct', `number-${challenge.answer}`], audioVoice).then(
-        (completed) => {
-          if (completed) nextQuestion(activeGame, activeLevel);
-        },
-      );
+      void playAudioFiles(
+        correctAudioFiles(challenge.answer, audioVoice),
+        audioVoice,
+        correctAudioRate,
+      ).then((completed) => {
+        if (completed) nextQuestion(activeGame, activeLevel);
+      });
       return;
     }
 
@@ -764,7 +850,7 @@ export default function Home() {
                 aria-label="Nghe lại câu hỏi"
                 className="h-20 w-20 overflow-hidden rounded-[22px] bg-transparent p-0 shadow-[0_7px_0_#d7a72a,0_10px_22px_rgb(65_164_219/30%)] hover:scale-105 hover:bg-transparent active:translate-y-1 active:shadow-[0_3px_0_#d7a72a] sm:h-[92px] sm:w-[92px]"
                 onClick={() =>
-                  void playAudioFiles(challengeAudioFiles(challenge, activeGame), audioVoice)
+                  void playAudioFiles(challengeAudioFiles(challenge, activeGame, audioVoice), audioVoice)
                 }
                 title="Nghe lại câu hỏi"
                 type="button"
